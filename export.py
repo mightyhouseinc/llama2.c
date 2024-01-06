@@ -74,56 +74,53 @@ def quantize_q80(w, group_size):
 
 def legacy_export(model, filepath):
     """ Original export of llama2.c bin files, i.e. version v0 """
-    out_file = open(filepath, 'wb')
+    with open(filepath, 'wb') as out_file:
+        # first write out the header
+        hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
+        p = model.params
+        shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
+        # legacy format uses negative/positive vocab size as a shared classifier flag
+        if not shared_classifier:
+            p.vocab_size = -p.vocab_size
+        n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
+        header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
+                                        n_kv_heads, p.vocab_size, p.max_seq_len)
+        out_file.write(header)
 
-    # first write out the header
-    hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
-    p = model.params
-    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
-    # legacy format uses negative/positive vocab size as a shared classifier flag
-    if not shared_classifier:
-        p.vocab_size = -p.vocab_size
-    n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
-    header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
-                                    n_kv_heads, p.vocab_size, p.max_seq_len)
-    out_file.write(header)
+        # next write out the embedding weights
+        serialize_fp32(out_file, model.tok_embeddings.weight)
 
-    # next write out the embedding weights
-    serialize_fp32(out_file, model.tok_embeddings.weight)
+        # now all the layers
+        # attention weights
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention_norm.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wq.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wk.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wv.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.attention.wo.weight)
+        # ffn weights
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.ffn_norm.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.feed_forward.w1.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.feed_forward.w2.weight)
+        for layer in model.layers:
+            serialize_fp32(out_file, layer.feed_forward.w3.weight)
+        # final rmsnorm
+        serialize_fp32(out_file, model.norm.weight)
+        # freqs_cis
+        serialize_fp32(out_file, model.freqs_cos[:p.max_seq_len])
+        serialize_fp32(out_file, model.freqs_sin[:p.max_seq_len])
 
-    # now all the layers
-    # attention weights
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.attention_norm.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.attention.wq.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.attention.wk.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.attention.wv.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.attention.wo.weight)
-    # ffn weights
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.ffn_norm.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.feed_forward.w1.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.feed_forward.w2.weight)
-    for layer in model.layers:
-        serialize_fp32(out_file, layer.feed_forward.w3.weight)
-    # final rmsnorm
-    serialize_fp32(out_file, model.norm.weight)
-    # freqs_cis
-    serialize_fp32(out_file, model.freqs_cos[:p.max_seq_len])
-    serialize_fp32(out_file, model.freqs_sin[:p.max_seq_len])
+        # final classifier weights
+        if not shared_classifier:
+            serialize_fp32(out_file, model.output.weight)
 
-    # final classifier weights
-    if not shared_classifier:
-        serialize_fp32(out_file, model.output.weight)
-
-    # write to binary file
-    out_file.close()
     print(f"wrote {filepath}")
 
 # -----------------------------------------------------------------------------
@@ -136,47 +133,45 @@ def version1_export(model, filepath):
     """
     version = 1
 
-    out_file = open(filepath, 'wb')
-    # first write out the header. the header will be 256 bytes
-    # 1) write magic, which will be uint32 of "ak42" in ASCII
-    out_file.write(struct.pack('I', 0x616b3432))
-    # 2) write version, which will be int
-    out_file.write(struct.pack('i', version))
-    # 3) write the params, which will be 7 ints
-    p = model.params
-    hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
-    n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
-    header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
-                                    n_kv_heads, p.vocab_size, p.max_seq_len)
-    out_file.write(header)
-    # 4) write some other flags
-    shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
-    out_file.write(struct.pack('B', int(shared_classifier)))
-    pad = 256 - out_file.tell() # pad rest with zeros; tell returns current pos
-    assert pad >= 0
-    out_file.write(b'\0' * pad)
+    with open(filepath, 'wb') as out_file:
+        # first write out the header. the header will be 256 bytes
+        # 1) write magic, which will be uint32 of "ak42" in ASCII
+        out_file.write(struct.pack('I', 0x616b3432))
+        # 2) write version, which will be int
+        out_file.write(struct.pack('i', version))
+        # 3) write the params, which will be 7 ints
+        p = model.params
+        hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
+        n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
+        header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
+                                        n_kv_heads, p.vocab_size, p.max_seq_len)
+        out_file.write(header)
+        # 4) write some other flags
+        shared_classifier = torch.equal(model.tok_embeddings.weight, model.output.weight)
+        out_file.write(struct.pack('B', int(shared_classifier)))
+        pad = 256 - out_file.tell() # pad rest with zeros; tell returns current pos
+        assert pad >= 0
+        out_file.write(b'\0' * pad)
 
-    # now let's write out all the params
-    weights = [
-        *[layer.attention_norm.weight for layer in model.layers],
-        *[layer.ffn_norm.weight for layer in model.layers],
-        model.norm.weight,
-        model.tok_embeddings.weight,
-        *[layer.attention.wq.weight for layer in model.layers],
-        *[layer.attention.wk.weight for layer in model.layers],
-        *[layer.attention.wv.weight for layer in model.layers],
-        *[layer.attention.wo.weight for layer in model.layers],
-        *[layer.feed_forward.w1.weight for layer in model.layers],
-        *[layer.feed_forward.w2.weight for layer in model.layers],
-        *[layer.feed_forward.w3.weight for layer in model.layers],
-    ]
-    if not shared_classifier:
-        weights.append(model.output.weight)
-    for w in weights:
-        serialize_fp32(out_file, w)
+        # now let's write out all the params
+        weights = [
+            *[layer.attention_norm.weight for layer in model.layers],
+            *[layer.ffn_norm.weight for layer in model.layers],
+            model.norm.weight,
+            model.tok_embeddings.weight,
+            *[layer.attention.wq.weight for layer in model.layers],
+            *[layer.attention.wk.weight for layer in model.layers],
+            *[layer.attention.wv.weight for layer in model.layers],
+            *[layer.attention.wo.weight for layer in model.layers],
+            *[layer.feed_forward.w1.weight for layer in model.layers],
+            *[layer.feed_forward.w2.weight for layer in model.layers],
+            *[layer.feed_forward.w3.weight for layer in model.layers],
+        ]
+        if not shared_classifier:
+            weights.append(model.output.weight)
+        for w in weights:
+            serialize_fp32(out_file, w)
 
-    # write to binary file
-    out_file.close()
     print(f"wrote {filepath}")
 
 def version2_export(model, filepath, group_size=64):
@@ -209,60 +204,57 @@ def version2_export(model, filepath, group_size=64):
     for w in weights:
         assert w.numel() % group_size == 0, f"weight {i} has numel {w.numel()}, not a multiple of group_size {group_size}"
 
-    # write
-    out_file = open(filepath, 'wb')
-    # first write out the header. the header will be 256 bytes
-    # 1) write magic, which will be uint32 of "ak42" in ASCII
-    out_file.write(struct.pack('I', 0x616b3432))
-    # 2) write version, which will be int
-    out_file.write(struct.pack('i', version))
-    # 3) write the params, which will be 7 ints
-    p = model.params
-    hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
-    n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
-    header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
-                                    n_kv_heads, p.vocab_size, p.max_seq_len)
-    out_file.write(header)
-    # 4) write some other flags
-    out_file.write(struct.pack('B', int(shared_classifier)))
-    out_file.write(struct.pack('i', group_size)) # group size used for quantization
-    pad = 256 - out_file.tell() # pad rest with zeros; tell returns current pos
-    assert pad >= 0
-    out_file.write(b'\0' * pad)
-    # now that the header is done, let's write out the model
+    with open(filepath, 'wb') as out_file:
+        # first write out the header. the header will be 256 bytes
+        # 1) write magic, which will be uint32 of "ak42" in ASCII
+        out_file.write(struct.pack('I', 0x616b3432))
+        # 2) write version, which will be int
+        out_file.write(struct.pack('i', version))
+        # 3) write the params, which will be 7 ints
+        p = model.params
+        hidden_dim = model.layers[0].feed_forward.w1.weight.shape[0]
+        n_kv_heads = p.n_heads if p.n_kv_heads is None else p.n_kv_heads
+        header = struct.pack('iiiiiii', p.dim, hidden_dim, p.n_layers, p.n_heads,
+                                        n_kv_heads, p.vocab_size, p.max_seq_len)
+        out_file.write(header)
+        # 4) write some other flags
+        out_file.write(struct.pack('B', int(shared_classifier)))
+        out_file.write(struct.pack('i', group_size)) # group size used for quantization
+        pad = 256 - out_file.tell() # pad rest with zeros; tell returns current pos
+        assert pad >= 0
+        out_file.write(b'\0' * pad)
+        # now that the header is done, let's write out the model
 
-    # first let's write out all the params that we are keeping in fp32: the norms
-    for layer in model.layers: # attention norms
-        serialize_fp32(out_file, layer.attention_norm.weight)
-    for layer in model.layers: # MLP norms
-        serialize_fp32(out_file, layer.ffn_norm.weight)
-    serialize_fp32(out_file, model.norm.weight) # final pre-classifier norm
+        # first let's write out all the params that we are keeping in fp32: the norms
+        for layer in model.layers: # attention norms
+            serialize_fp32(out_file, layer.attention_norm.weight)
+        for layer in model.layers: # MLP norms
+            serialize_fp32(out_file, layer.ffn_norm.weight)
+        serialize_fp32(out_file, model.norm.weight) # final pre-classifier norm
 
-    # now let's write out all the params that we are quantizing to Q8_0
-    # note we skip classifier weights, which are shared with the embedding
-    ew = []
-    scales = []
-    for i, w in enumerate(weights):
-        # quantize this weight
-        q, s, err = quantize_q80(w, group_size)
-        # save the int8 weights to file
-        serialize_int8(out_file, q) # save the tensor in int8
-        scales.append(s)  # we'll do all the scales after all the qs
-        # logging
-        ew.append((err, w.shape))
-        print(f"{i+1}/{len(weights)} quantized {tuple(w.shape)} to Q8_0 with max error {err}")
+        # now let's write out all the params that we are quantizing to Q8_0
+        # note we skip classifier weights, which are shared with the embedding
+        ew = []
+        scales = []
+        for i, w in enumerate(weights):
+            # quantize this weight
+            q, s, err = quantize_q80(w, group_size)
+            # save the int8 weights to file
+            serialize_int8(out_file, q) # save the tensor in int8
+            scales.append(s)  # we'll do all the scales after all the qs
+            # logging
+            ew.append((err, w.shape))
+            print(f"{i+1}/{len(weights)} quantized {tuple(w.shape)} to Q8_0 with max error {err}")
 
-    # save the scaling factors in fp32 here
-    # this is done to keep all the weights contiquous, making pointer arithmetic easier in C
-    for s in scales:
-        serialize_fp32(out_file, s)
+        # save the scaling factors in fp32 here
+        # this is done to keep all the weights contiquous, making pointer arithmetic easier in C
+        for s in scales:
+            serialize_fp32(out_file, s)
 
-    # print the highest error across all weights, should be very small, e.g. O(~0.001)
-    ew.sort(reverse=True)
-    print(f"max quantization group error across all weights: {ew[0][0]}")
+        # print the highest error across all weights, should be very small, e.g. O(~0.001)
+        ew.sort(reverse=True)
+        print(f"max quantization group error across all weights: {ew[0][0]}")
 
-    # write to binary file
-    out_file.close()
     print(f"wrote {filepath}")
 
 

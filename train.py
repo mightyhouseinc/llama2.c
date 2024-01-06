@@ -16,6 +16,7 @@ $ torchrun --nproc_per_node=8 --nnodes=2 --node_rank=1 --master_addr=123.456.123
 (If your cluster does not have Infiniband interconnect prepend NCCL_IB_DISABLE=1)
 """
 
+
 import math
 import os
 import time
@@ -86,7 +87,7 @@ lr_decay_iters = max_iters  # should be ~= max_iters per Chinchilla
 min_lr = 0.0  # minimum learning rate, should be ~= learning_rate/10 per Chinchilla
 
 # validating checks
-assert vocab_source in ["llama2", "custom"]
+assert vocab_source in {"llama2", "custom"}
 assert vocab_source == "custom" or vocab_size == 32000, "The vocab from Meta has 32K tokens"
 
 # various inits, derived attributes, I/O setup
@@ -154,12 +155,7 @@ model_args = dict(
     max_seq_len=max_seq_len,
     dropout=dropout,
 )  # start with model_args from command line
-if init_from == "scratch":
-    # init a new model from scratch
-    print("Initializing a new model from scratch")
-    gptconf = ModelArgs(**model_args)
-    model = Transformer(gptconf)
-elif init_from == "resume":
+if init_from == "resume":
     print(f"Resuming training from {out_dir}")
     # resume training from a checkpoint.
     ckpt_path = os.path.join(out_dir, "ckpt.pt")
@@ -182,6 +178,11 @@ elif init_from == "resume":
     model.load_state_dict(state_dict)
     iter_num = checkpoint["iter_num"]
     best_val_loss = checkpoint["best_val_loss"]
+elif init_from == "scratch":
+    # init a new model from scratch
+    print("Initializing a new model from scratch")
+    gptconf = ModelArgs(**model_args)
+    model = Transformer(gptconf)
 model.to(device)
 
 # initialize a GradScaler. If enabled=False scaler is a no-op
@@ -204,7 +205,7 @@ if ddp:
     # Ignore the `freqs_cis` buffer so that DDP does not broadcast it at
     # construction time since NCCL does not support `ComplexFloat`
     prefix = "_orig_mod." if compile else ""
-    model._ddp_params_and_buffers_to_ignore = {prefix + "freqs_cis"}
+    model._ddp_params_and_buffers_to_ignore = {f"{prefix}freqs_cis"}
     model = DDP(model, device_ids=[ddp_local_rank])
 
 # helps estimate an arbitrarily accurate loss over either split using many batches
