@@ -50,7 +50,7 @@ def reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor):
     ndim = x.ndim
     assert 0 <= 1 < ndim
     assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+    shape = [d if i in [1, ndim - 1] else 1 for i, d in enumerate(x.shape)]
     return freqs_cis.view(shape)
 
 def apply_rotary_emb(
@@ -199,8 +199,7 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x, freqs_cos, freqs_sin):
         h = x + self.attention.forward(self.attention_norm(x), freqs_cos, freqs_sin)
-        out = h + self.feed_forward.forward(self.ffn_norm(h))
-        return out
+        return h + self.feed_forward.forward(self.ffn_norm(h))
 
 
 class Transformer(nn.Module):
@@ -270,7 +269,7 @@ class Transformer(nn.Module):
 
     def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
         # start with all of the candidate parameters
-        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = dict(self.named_parameters())
         # filter out those that do not require grad
         param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
         # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
@@ -307,8 +306,7 @@ class Transformer(nn.Module):
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0/dt) # per second
         flops_promised = 312e12 # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
+        return flops_achieved / flops_promised
 
     @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
